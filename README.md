@@ -3,11 +3,11 @@
 
 # Projet NexSlice : Scheduler Kubernetes Intelligent (IA/Heuristique)
 
-**Auteur :** Ryan ZERHOUNI
+**Auteurs :** Ryan ZERHOUNI, Anas FERRAH, Sam BOUCHET, Othmane TAIRECH
 
 **Contexte :** Projet 4 - Scheduler Intelligent avec IA pour Réseau 5G Slicing
 
-**Environnement :** macOS (Apple Silicon M4 Pro) / OrbStack / K3d
+**Environnement utilisé :** macOS (Apple Silicon M4 Pro) / OrbStack / K3d
 
 -----
 
@@ -23,24 +23,128 @@ Dans un contexte de Network Slicing 5G, le placement des fonctions réseaux (UPF
 
 -----
 
-## 2\. Méthodologie et Architecture
+## 2\. État de l’art : scheduling 5G cloud-native et limites de Kubernetes
 
-### 2.1 Choix Technologiques
+### 2.1 5G, network slicing et exigences de QoS
+
+La 5G introduit le **network slicing** pour faire cohabiter sur la même infrastructure des services aux besoins très différents (eMBB, URLLC, mMTC). Chaque *slice* correspond à un réseau logique de bout en bout, avec ses propres fonctions réseau (RAN, cœur 5G) et ses propres objectifs de performance (latence, débit, isolation, fiabilité).
+
+Les spécifications 3GPP (TS 28.530, 28.531, 28.532, 28.533) définissent :
+- le modèle d’information des slices,
+- les opérations de cycle de vie (création / modification / suppression),
+- et les KPIs / SLA à respecter pour la QoS.
+
+Cela impose :
+- une **latence faible** (en particulier pour l’URLLC),
+- un **débit garanti** (eMBB),
+- une **isolation logique** des ressources (CPU, mémoire, bande passante),
+- une **élasticité dynamique** pour suivre la demande.
+
+SchedulerTa3IA s’inscrit dans ce contexte : son objectif est d’améliorer le placement des fonctions réseau pour mieux respecter ces contraintes de QoS dans un environnement Kubernetes.
+
+### 2.2 Cloud-native 5G et rôle de Kubernetes
+
+Avec la 5G, les fonctions réseau migrent de VNFs monolithiques vers des **Cloud-Native Network Functions (CNFs)**, packagées en conteneurs et orchestrées par Kubernetes. Plusieurs cœurs 5G open source (OpenAirInterface, Open5GS, etc.) adoptent cette approche.
+
+Dans ce cadre :
+- Kubernetes fournit le **plan de contrôle** pour créer / supprimer / scaler les pods,
+- assure le **service discovery** (Services, EndpointSlices),
+- et s’appuie sur un composant clé : le **kube-scheduler**, responsable du placement des pods sur les nœuds.
+
+SchedulerTa3IA s’insère dans cette architecture cloud-native : il se connecte à n’importe quel cluster Kubernetes (y compris un déploiement existant de type NexSlice) pour expérimenter et appliquer des politiques de scheduling spécifiques au slicing 5G, en venant **compléter** le comportement du kube-scheduler par défaut grâce à une couche d’IA — sans modifier ni forker Kubernetes.
+
+### 2.3 kube-scheduler : fonctionnement et limites pour le slicing 5G
+
+Le kube-scheduler effectue classiquement deux étapes :
+1. **Filtrage** des nœuds admissibles (ressources disponibles, taints/tolerations, affinités, etc.).
+2. **Scoring** pour choisir le “meilleur” nœud via différents plugins.
+
+Même si le *Scheduling Framework* permet d’ajouter des plugins custom (Filter, Score, Bind, …), le scheduler par défaut reste centré sur :
+- les **requests/limits** CPU et mémoire déclarées par les pods,
+- et quelques contraintes de topologie (labels, zones).
+
+En revanche, pour le slicing 5G, il ne prend pas nativement en compte :
+- la **latence réseau** entre nœuds,
+- la **bande passante disponible**,
+- le **type de fonction 5G** (UPF, SMF, AMF, CU/DU),
+- ni les **objectifs SLA spécifiques à un slice** (latence cible, débit, isolement).
+
+Conséquence : le placement pod-par-pod peut aboutir à :
+- des slices **partiellement déployées**,
+- un **gaspillage de ressources** (CPU/énergie),
+- et un **non-respect** des contraintes de latence ou d’isolation.
+
+SchedulerTa3IA répond à ce manque en introduisant un scheduler IA externe qui se base sur l’**utilisation réelle** CPU/RAM des nœuds et des critères métier, ce que kube-scheduler ne fait pas par défaut.
+
+### 2.4 Approches avancées pour le scheduling 5G et microservices
+
+La littérature récente explore plusieurs pistes pour améliorer le scheduling dans des scénarios 5G cloud-native :
+
+#### a) Heuristiques et métaheuristiques
+
+Des travaux modélisent le placement des slices comme un problème de **Virtual Network Embedding (VNE)**, et utilisent des heuristiques (dont des algorithmes génétiques) pour :
+- décider si une slice entière est admissible (*all-or-nothing*),
+- optimiser le **taux d’acceptation** des slices,
+- réduire la **consommation énergétique** et le temps de déploiement.
+
+SchedulerTa3IA se place dans cette famille *heuristique/IA*, avec une approche volontairement simple et explicable : un **Score de Disponibilité** basé sur la charge CPU/RAM réelle pour chaque nœud, combiné à une logique de décision pilotée par l’IA pour guider le placement.
+
+#### b) Ordonnanceurs “network-aware” et co-scheduling
+
+D’autres ordonnanceurs se focalisent sur la **latence réseau** et les **graphes de communication** entre pods :
+- prise en compte d’une matrice latence/bande passante entre nœuds,
+- co-scheduling de groupes de pods (une application ou un slice complet) plutôt que pod par pod,
+- co-localisation de fonctions fortement couplées (par ex. UPF–gNB/DU, UPF–SMF/AMF).
+
+Ces approches visent à réduire la latence inter-pods et à mieux exploiter la topologie réseau, ce qui est critique pour les services 5G sensibles à la QoS.
+
+#### c) Schedulers basés sur le Machine Learning / Reinforcement Learning
+
+Un troisième axe consiste à utiliser l’**apprentissage par renforcement (RL / DRL)** pour apprendre automatiquement une politique de placement sur Kubernetes. Les travaux existants montrent que le RL peut :
+- observer l’état du cluster (charge CPU/mémoire, métriques applicatives),
+- choisir dynamiquement le nœud pour chaque pod,
+- optimiser simultanément **latence**, **taux de complétion**, **équilibrage de charge** et **utilisation des ressources**.
+
+Au-delà de Kubernetes, le DRL est aussi appliqué au **network slicing** (cœur + RAN), où l’allocation de ressources entre slices est vue comme un problème de décision séquentielle multi-objectif.
+
+---
+
+**Positionnement de SchedulerTa3IA :**  
+SchedulerTa3IA ne cherche pas (encore) à concurrencer toutes les approches avancées de type RL ou métaheuristiques complètes. Il se positionne comme un **scheduler IA léger** qui **complète** le kube-scheduler, facile à déployer et à comprendre. Il ne repose pas sur NexSlice ni sur un déploiement spécifique : c’est un composant indépendant que l’on peut brancher en surcouche sur différents environnements Kubernetes (dont NexSlice) pour en optimiser le comportement de scheduling.
+
+Il montre concrètement :
+
+- qu’un ordonnanceur spécialisé 5G peut améliorer l’**équilibrage de charge réel** par rapport au kube-scheduler par défaut,
+- qu’exposer la **télémétrie réelle** (Metrics Server) et des règles IA de décision au scheduler est déjà un levier puissant pour mieux respecter les contraintes du slicing 5G,
+- et qu’il peut être intégré à des solutions existantes (par exemple un environnement NexSlice) pour en **optimiser** l’ordonnancement sans en changer l’architecture.
+
+-----
+
+## 3\. Méthodologie et Architecture
+
+### 3.1 Choix Technologiques
 
   * **Langage : Python**. Choisi pour sa rapidité de prototypage et sa richesse en librairies pour l'interaction API (vs Go qui est plus complexe pour un POC).
   * **Infrastructure : K3d (via OrbStack)**. Permet de simuler un cluster multi-nœuds (1 Master + 2 Agents) sur une architecture ARM64 locale.
   * **Données : Metrics Server**. Nous n'utilisons pas Prometheus (trop lourd pour ce prototype) mais l'API native `metrics.k8s.io` pour obtenir la télémétrie en temps réel.
 
-### 2.2 Algorithme de Décision (L'IA Heuristique)
+### 3.2 Algorithme de Décision (L'IA Heuristique)
 
 Contrairement au placement statique, notre algorithme calcule un **Score de Disponibilité** pour chaque nœud en temps réel.
 
-$$Score = \frac{(100\% - \%CPU_{utilisé}) + (100\% - \%RAM_{utilisée})}{2}$$
+$$
+\text{Score} =
+\frac{
+  (100 - \text{CPU}_{\text{utilisé}})
+  +
+  (100 - \text{RAM}_{\text{utilisée}})
+}{2}
+$$
 
   * Plus le score est élevé, plus le nœud est vide.
   * Le scheduler sélectionne le nœud avec le **Score Max**.
 
-### 2.3 Architecture Technique
+### 3.3 Architecture Technique
 
 1.  **Filtrage :** Le script écoute les pods ayant le statut `Pending` et le champ `schedulerName: nexslice-ai`.
 2.  **Collecte :** Interrogation de l'API `/apis/metrics.k8s.io/v1beta1/nodes`.
@@ -49,9 +153,9 @@ $$Score = \frac{(100\% - \%CPU_{utilisé}) + (100\% - \%RAM_{utilisée})}{2}$$
 
 -----
 
-## 3\. Implémentation (Les Scripts)
+## 4\. Implémentation (Les Scripts)
 
-### 3.1 Le Cerveau : `ai_scheduler.py`
+### 4.1 Le Cerveau : `ai_scheduler.py`
 
 Ce script est le cœur du projet. Il tourne en continu pour surveiller et assigner les pods.
 
@@ -162,7 +266,7 @@ if __name__ == '__main__':
     main()
 ```
 
-### 3.2 Le Scénario de Test Automatisé : `demo_video.sh`
+### 4.2 Le Scénario de Test Automatisé : `demo_video.sh`
 
 Ce script Bash orchestre la démonstration en générant de la charge CPU (Stress Test) pour forcer le scheduler à réagir.
 
@@ -254,7 +358,7 @@ fi
 
 -----
 
-## 4\. Résultats et Validation
+## 5\. Résultats et Validation
 
 Les tests ont été effectués en provoquant une saturation artificielle (Stress Test CPU \> 90%) séquentiellement sur chaque nœud. Notre saturation n'a pu amener le CPU qu'a 14% mais ceci est suffisant puisque, étant donnée qu'on repartait d'un cluster kubernetes vierge, l'autre node était a 0% d'utilisation de CPU.
 
@@ -278,7 +382,7 @@ Les tests ont été effectués en provoquant une saturation artificielle (Stress
 
 -----
 
-## 5\. Guide de Reproduction
+## 6\. Guide de Reproduction
 
 Pour reproduire ces résultats sur un environnement neuf :
 
@@ -518,7 +622,7 @@ Les résultats sur notre environnement de test (Apple Silicon M4 Pro)  montrent 
 
 **Note technique :** Les pourcentages absolus peuvent sembler bas (20%) car les conteneurs de stress sont très légers pour la puissance de calcul de la machine hôte (M4 Pro). Cependant, le **différentiel** valide l'algorithme : NexSlice AI lisse la charge mieux que le standard Kubernetes.
 
-## 7\. Conclusion
+## 8\. Conclusion
 
 Ce projet démontre la faisabilité d'un **scheduler intelligent externe** pour Kubernetes. En moins de 150 lignes de code Python, nous avons implémenté un système de **Load Balancing réactif** basé sur la télémétrie réelle.
 
