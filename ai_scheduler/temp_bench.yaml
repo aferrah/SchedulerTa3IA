@@ -1,0 +1,14 @@
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client-ai
+spec:
+  schedulerName: nexslice-ai
+  containers:
+  - name: c
+    image: vish/stress
+    args: ["-cpus", "3"]
+    resources:
+      requests:
+        cpu: "100m"

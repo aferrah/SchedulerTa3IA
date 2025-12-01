@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: oai-upf-smart
+  labels:
+    app: upf  # Le label clé pour notre IA
+spec:
+  schedulerName: nexslice-ai  # <--- On appelle TON scheduler
+  containers:
+  - name: nginx
+    image: nginx:alpine
